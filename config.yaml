@@ -1,0 +1,17 @@
+experiment:
+  # Directory containing the .npz files
+  data_dir: "data"
+
+output:
+  # Folder where all results will be saved
+  results_dir: "results"
+  
+  # Filename for the CSV report. Set to null (or leave empty) to skip saving.
+  summary_file: "phase_estimates.csv"
+  
+  # Subfolder for figures. Set to null to skip generating plots.
+  figures_folder: "figures"
+
+settings:
+  # Optional: You can control specific analysis parameters here later
+  save_plots: true
