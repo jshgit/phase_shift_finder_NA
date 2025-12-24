@@ -4,6 +4,7 @@ import argparse
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import logging
 
 from src.data_loader import DataLoader
 from src.signal_processor import SignalProcessor
@@ -18,50 +19,79 @@ def main():
     parser.add_argument('--config', type=str, default='config.yaml', help="Path to configuration file")
     args = parser.parse_args()
 
-    # 1. Load Configuration
+    # 1. Setup Logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    # 2. Load Configuration
     if not os.path.exists(args.config):
-        raise FileNotFoundError(f"Configuration file not found: {args.config}")
+        logging.error(f"Configuration file '{args.config}' not found.")
+        return
     
     config = load_config(args.config)
     
     # Extract Paths
     data_dir = config['experiment']['data_dir']
+    specific_file = config['experiment'].get('input_filename')
     results_dir = config['output']['results_dir']
     summary_filename = config['output'].get('summary_file')
     figures_folder_name = config['output'].get('figures_folder')
     
-    # Create Results Directory if it doesn't exist
     if not os.path.exists(results_dir):
         os.makedirs(results_dir)
 
-    # Determine if we are plotting
     should_plot = figures_folder_name is not None
     figs_dir = None
     if should_plot:
         figs_dir = os.path.join(results_dir, figures_folder_name)
         os.makedirs(figs_dir, exist_ok=True)
 
-    # Initialize Modules
+    # 3. Initialize Modules
     loader = DataLoader(data_dir)
-    processor = SignalProcessor()
-    analyzer = FringeAnalyzer()
-
-    results = []
     
+    # Init SignalProcessor
+    sp_config = config.get('signal_processor', {})
+    logging.info(f"SignalProcessor Config: {sp_config}")
+    processor = SignalProcessor(**sp_config)
+    
+    # Init FringeAnalyzer
+    analyzer = FringeAnalyzer()
+    fa_config = config.get('fringe_analyzer', {})
+    logging.info(f"FringeAnalyzer Config: {fa_config}")
+
+    # 4. Determine File List
     try:
-        files = loader.get_file_list()
+        all_files = loader.get_file_list()
     except FileNotFoundError:
-        print(f"Error: Data directory '{data_dir}' not found.")
+        logging.error(f"Data directory '{data_dir}' not found.")
         return
 
-    print(f"Found {len(files)} files in '{data_dir}'. Processing...")
+    if not all_files:
+        logging.warning(f"No .npz files found in {data_dir}")
+        return
 
-    for filename in files:
-        print(f"Processing {filename}...")
+    if specific_file:
+        if specific_file in all_files:
+            files_to_process = [specific_file]
+        else:
+            logging.error(f"File '{specific_file}' not found.")
+            return
+    else:
+        files_to_process = all_files
+        logging.info(f"Processing {len(files_to_process)} files.")
+
+    results = []
+
+    # 5. Main Loop
+    for filename in files_to_process:
+        logging.info(f"Processing {filename}...")
         try:
             time, cond_a, cond_b = loader.load_run(filename)
         except Exception as e:
-            print(f"Failed to load {filename}: {e}")
+            logging.error(f"Failed to load {filename}: {e}")
             continue
         
         for condition_name, cond_data in [('A', cond_a), ('B', cond_b)]:
@@ -69,62 +99,131 @@ def main():
             signals = cond_data['signals']
             t_edge = cond_data['t_edge']
             
+            # Arrays to hold trace-by-trace stats
             ratios = []
+            uncertainties = []
+            r1_r2_scores = [] 
+            r2_r2_scores = [] 
             
-            # --- Signal Extraction ---
+            # --- TRACE FITTING ---
             for i in range(len(signals)):
                 trace = signals[i]
-                (t1, s1), (t2, s2) = loader.split_trace(time, trace, t_edge)
                 
-                amp1 = processor.get_amplitude_region1(t1, s1)
-                amp2 = processor.get_amplitude_region2(t2, s2)
+                # Fit the individual trace
+                res = processor.run(time, trace, t_edge)
                 
-                if amp2 > 0:
-                    ratios.append(amp1 / amp2)
+                # Extract Ratio & Uncertainty
+                if np.isfinite(res['ratio']):
+                    ratios.append(res['ratio'])
+                    uncertainties.append(res['ratio_uncertainty'])
                 else:
                     ratios.append(np.nan)
+                    uncertainties.append(np.nan)
+                
+                # Extract R-Squared values for the FringeAnalyzer's filter
+                r1_r2_scores.append(res['region1'].get('r_squared', 0.0))
+                r2_r2_scores.append(res['region2'].get('r_squared', 0.0))
             
+            # Convert to numpy
             ratios = np.array(ratios)
+            uncertainties = np.array(uncertainties)
+            r1_r2_scores = np.array(r1_r2_scores)
+            r2_r2_scores = np.array(r2_r2_scores)
             
-            # --- Physics Analysis ---
-            phase, unc = analyzer.estimate_phase(scan_params, ratios)
+            # --- FRINGE ANALYSIS ---
+            fringe_res = analyzer.fit(
+                scan_params, 
+                ratios, 
+                uncertainties, 
+                r1_r2_scores, 
+                r2_r2_scores,
+                **fa_config 
+            )
             
-            results.append({
-                'Filename': filename,
-                'Condition': condition_name,
-                'Phase_mrad': phase,
-                'Uncertainty_mrad': unc
-            })
+            # Handle results
+            if fringe_res:
+                phase_mrad = fringe_res['phase_rad'] * 1000 
+                phase_unc_mrad = fringe_res['phase_err'] * 1000
+                
+                results.append({
+                    'Filename': filename,
+                    'Condition': condition_name,
+                    'Phase_mrad': phase_mrad,
+                    'Uncertainty_mrad': phase_unc_mrad,
+                    'N_Used': fringe_res['n_used']
+                })
+                
+                # --- PLOTTING (Updated) ---
+                if should_plot:
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    
+                    # 1. Valid Data Points
+                    valid = fringe_res['valid_mask']
+                    ax.errorbar(
+                        scan_params[valid], 
+                        ratios[valid], 
+                        yerr=uncertainties[valid], 
+                        fmt='o', 
+                        color='blue', 
+                        label='Valid Data', 
+                        alpha=0.8, 
+                        capsize=2
+                    )
+                    
+                    # 2. Rejected Data (Vertical Lines Only)
+                    # We iterate through unique x-values of rejected points to avoid drawing 
+                    # multiple lines if multiple repeats at the same scan param are rejected.
+                    
+                    # R^2 Failures (Red)
+                    rej_r2_x = np.unique(scan_params[fringe_res['mask_rej_r2']])
+                    for x_val in rej_r2_x:
+                        ax.axvline(x_val, color='red', linestyle='--', alpha=0.5, 
+                                   label='Poor Trace Fit' if x_val == rej_r2_x[0] else "")
 
-            # --- Optional Plotting ---
-            if should_plot and not np.isnan(phase):
-                plt.figure(figsize=(10, 4))
-                
-                # Plot Raw Data
-                plt.scatter(scan_params, ratios, label='Data', alpha=0.7)
-                
-                # Reconstruct Sine for Visualization
-                # Note: We do a quick local fit just for plotting logic or use parameters if returned
-                # For simplicity here, we just visualize the data vs phase result text
-                
-                plt.title(f"{filename} - Condition {condition_name} (Phase: {phase:.2f} mrad)")
-                plt.xlabel("Scan Parameter (Deg)")
-                plt.ylabel("Ratio")
-                plt.grid(True, alpha=0.3)
-                plt.legend()
-                
-                save_path = os.path.join(figs_dir, f"{filename}_{condition_name}.png")
-                plt.savefig(save_path)
-                plt.close()
+                    # Outliers (Orange)
+                    rej_ratio_x = np.unique(scan_params[fringe_res['mask_rej_ratio']])
+                    for x_val in rej_ratio_x:
+                        ax.axvline(x_val, color='orange', linestyle='--', alpha=0.5, 
+                                   label='Outlier' if x_val == rej_ratio_x[0] else "")
 
-    # --- Save Summary CSV ---
-    if summary_filename:
+                    # High Uncertainty (Gold)
+                    rej_unc_x = np.unique(scan_params[fringe_res['mask_rej_unc']])
+                    for x_val in rej_unc_x:
+                        ax.axvline(x_val, color='gold', linestyle='--', alpha=0.6, 
+                                   label='High Uncertainty' if x_val == rej_unc_x[0] else "")
+
+                    # 3. Fit Model
+                    x_fit = np.linspace(scan_params.min(), scan_params.max(), 100)
+                    y_fit = analyzer._sine_model(x_fit, *fringe_res['params'])
+                    ax.plot(x_fit, y_fit, 'g-', linewidth=2, label='Fit Model')
+
+                    # 4. Formatting
+                    ax.set_title(
+                        f"{filename} [Cond {condition_name}]\n"
+                        f"Phase: {phase_mrad:.2f} $\pm$ {phase_unc_mrad:.2f} mrad"
+                    )
+                    ax.set_xlabel("Scan Parameter")
+                    ax.set_ylabel("Ratio")
+                    
+                    # Deduplicate legend entries (in case loops added multiple labels)
+                    handles, labels = ax.get_legend_handles_labels()
+                    by_label = dict(zip(labels, handles))
+                    ax.legend(by_label.values(), by_label.keys(), loc='best', fontsize='small')
+                    
+                    ax.grid(True, alpha=0.3)
+                    
+                    save_path = os.path.join(figs_dir, f"{filename}_{condition_name}.png")
+                    plt.savefig(save_path)
+                    plt.close()
+            else:
+                logging.warning(f"Fringe fit failed for {filename} Condition {condition_name}")
+
+    # 6. Save Summary
+    if summary_filename and results:
         output_path = os.path.join(results_dir, summary_filename)
         df = pd.DataFrame(results)
         df.to_csv(output_path, index=False)
-        print(f"\nProcessing complete. Results saved to {output_path}")
-    else:
-        print("\nProcessing complete. CSV output skipped (filename was None).")
+        logging.info(f"Results saved to {output_path}")
 
 if __name__ == "__main__":
     main()

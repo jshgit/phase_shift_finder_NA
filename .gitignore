@@ -1,6 +1,12 @@
 data/
 
-batch_results/
+batch_results*/
+
+results*/
+
+*.json
+
+*.png
 
 .DS_store/
 

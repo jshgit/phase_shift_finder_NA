@@ -1,17 +1,23 @@
 experiment:
-  # Directory containing the .npz files
   data_dir: "data"
+  input_filename: "scan_000.npz" # if null main.py runs the analysis on all the files in the data_dir folder
+
+# Settings for SignalProcessor (Trace Fitting)
+signal_processor:
+  region2_model: "triple"
+  multi_pulse_return_mode: "sum"
+  fit_window: null
+
+# Settings for FringeAnalyzer (Sine Fitting)
+fringe_analyzer:
+  r2_threshold: 0.8
+  uncertainty_reject_count: 2
+  residual_z_score: 2.5
 
 output:
-  # Folder where all results will be saved
   results_dir: "results"
-  
-  # Filename for the CSV report. Set to null (or leave empty) to skip saving.
   summary_file: "phase_estimates.csv"
-  
-  # Subfolder for figures. Set to null to skip generating plots.
   figures_folder: "figures"
 
 settings:
-  # Optional: You can control specific analysis parameters here later
   save_plots: true
