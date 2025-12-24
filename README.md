@@ -23,11 +23,21 @@ The project is designed to be modular, separating data loading, signal processin
 
 ### 1. Installation
 
-Ensure you have a Python environment (e.g., Anaconda or venv) set up. Install the required dependencies:
+1. Installation
 
+It is recommended to use a fresh Conda environment to avoid conflicts.
+
+Create and activate a new environment:
 ```bash
-pip install numpy pandas matplotlib scipy pyyaml
+conda create -n quantum_analysis python=3.9
+conda activate quantum_analysis
 ```
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
 
 ### 2. Data Setup
 
@@ -149,5 +159,4 @@ A table containing the final results for every processed file:
 * `Uncertainty_mrad`: Propagated uncertainty of the estimate.
 * `N_Used`: Number of valid data points used in the final fit.
 
-```
-```
+
